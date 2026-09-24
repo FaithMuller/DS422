@@ -60,3 +60,21 @@ ggplot(data = oahu_median_household_income,
   geom_point() +
   geom_smooth(method = "lm")
 ```
+
+```{r}
+# Clean the solar data
+oahu_solar_clean <- oahu_solar |>
+  filter(!st_is_empty(geometry)) |>   # drop the 68 empty geometries
+  st_make_valid() |>                  # repair any self-intersecting polygons
+  st_transform(26904)                 # NAD83 / UTM Zone 4N (meters)
+
+# Clean the income data
+oahu_income <- oahu_median_household_income |>
+  st_transform(26904) |>
+  select(GEOID, NAME,
+         median_income = estimate,
+         median_income_moe = moe)
+
+# Confirm the two layers now share a CRS
+st_crs(oahu_solar_clean) == st_crs(oahu_income)
+```
