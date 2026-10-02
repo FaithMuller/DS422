@@ -1,5 +1,6 @@
 ---
-title: "Solar Detection & Income"
+title: "Solar Detection & Income on Oʻahu"
+author: "Faith Muller"
 format: html
 editor: visual
 ---
@@ -7,6 +8,9 @@ editor: visual
 ## Libraries
 
 ```{r}
+#| message: false
+#| warning: false
+
 library(tidyverse)
 library(here)
 library(sf)
@@ -16,65 +20,376 @@ library(tidycensus)
 
 ### Read in the data
 
-```{r}
-oahu_solar <- st_read(here("data/oahu_solar_dedup_simple.geojson"))
+The solar dataset contains 88,663 polygons of solar panels detected on O'ahu with the Segment Anything Model 3 (SAM3), which would show in environment if it ran successfully. Each polygon has a detection score (model confidence) and an area in square meters.
 
-View(oahu_solar)
+```{r}
+oahu_solar <- st_read(here("data/oahu_solar_dedup_simple.geojson"), quiet = TRUE)
 ```
 
 ### Map the data
 
+This is an interactive map of all detection.
+
+Something to note: this would not run when rendering because the HTML file is too large.
+
 ```{r}
+#| eval: false
+# Not run when rendering: 88k polygons would make the HTML file too large.
 mapview(oahu_solar)
 ```
 
-Just for fun:
+### Retrieve census data
+
+I downloaded median household income (ACS variable B19013_001) for every census tract in Honolulu County from the 2018–2022 5-year ACS, including tract boundaries.
 
 ```{r}
-ggplot(data = oahu_solar) +
-  geom_sf() +
-  scale_fill_viridis_c(option = "plasma") +
-  theme_minimal() 
-```
+#| message: false
 
-### Retrieve some census data
-
-```{r}
 oahu_median_household_income <- get_acs(
   geography = "tract", 
   variables = "B19013_001",
   state = "HI",
   county = "Honolulu",
   geometry = TRUE,
-  year = 2022)
+  year = 2022,
+  survey = "acs5")
 ```
 
-```{r}
-mapview(oahu_median_household_income,
-        zcol = "moe")
-```
+### Clean and align the data
+
+In class, we asked any AI assistant of our liking to help us clean and align the data. So with Claude, it helped me keep up with all this code chunk. It basically removed the 68 empty geometries, repaired invalid polygons with `st_make_valid()`, and projected both datasets to NAD83 / UTM Zone 4N (EPSG:26904). This puts both layers in the same coordinate system and in meters, so areas can be measured accurately. Honolulu County also includes the Northwestern Hawaiian Islands, so it kept only the tracts that overlap the extent of the solar data. The check should return `TRUE`, confirming both layers share a CRS.
 
 ```{r}
-ggplot(data = oahu_median_household_income, 
-       aes(x = moe, y = estimate)) +
-  geom_point() +
-  geom_smooth(method = "lm")
-```
+#| label: clean
 
-```{r}
 # Clean the solar data
 oahu_solar_clean <- oahu_solar |>
-  filter(!st_is_empty(geometry)) |>   # drop the 68 empty geometries
-  st_make_valid() |>                  # repair any self-intersecting polygons
-  st_transform(26904)                 # NAD83 / UTM Zone 4N (meters)
+  filter(!st_is_empty(geometry)) |>
+  st_make_valid() |>
+  st_transform(26904)
 
-# Clean the income data
+# Box around Oʻahu, taken from the solar data's extent
+oahu_box <- st_as_sfc(st_bbox(oahu_solar_clean))
+
+# Clean the income data and keep only Oʻahu tracts
 oahu_income <- oahu_median_household_income |>
   st_transform(26904) |>
   select(GEOID, NAME,
-         median_income = estimate,
-         median_income_moe = moe)
+         median_income     = estimate,
+         median_income_moe = moe) |>
+  st_filter(oahu_box)
 
-# Confirm the two layers now share a CRS
+# Checks
 st_crs(oahu_solar_clean) == st_crs(oahu_income)
+nrow(oahu_income)
+```
+
+### Explore the solar detection:
+
+This section was just to summary and understand the statistics of polygon size and detection score and the total detected solar area in km². And running the mapview() was to check whether they match real panels. After cleaning the data, this shows where the real panel are at and I made it show with the color "yellow".
+
+```{r}
+#| label: solar-summary
+
+nrow(oahu_solar_clean)
+summary(oahu_solar_clean$area_m2)
+summary(oahu_solar_clean$score)
+sum(oahu_solar_clean$area_m2) / 1e6   # total solar area in km²
+```
+
+```{r}
+#| label: solar-satellite
+#| eval: false
+
+mapview(oahu_solar_clean,
+        map.types     = "Esri.WorldImagery",
+        col.regions   = "yellow",
+        alpha.regions = 0.4)
+```
+
+### Median income map:
+
+This is a map that shows the median household income by tract in Oahu. It shows that lower-income tracts are concentrated on the Wai'anae coast and parts of urban Honolulu, and higher-income tracts in central and east Oahu. The 17 grey tracts have no income estimate because few or no people live there (might be forest/mountain, airport, parks, or some military land).
+
+```{r}
+#| label: income-map
+
+ggplot(oahu_income) +
+  geom_sf(aes(fill = median_income), color = NA) +
+  scale_fill_viridis_c(labels = scales::label_dollar(), na.value = "grey80") +
+  labs(title    = "Median household income by census tract, Oʻahu",
+       subtitle = "ACS 2018–2022 5-year estimates",
+       fill     = "Median income") +
+  theme_void()
+```
+
+Remove the \#'s in the code chunk below and run to check which tracts are grey.
+
+```{r}
+#oahu_income |>
+  #st_drop_geometry() |>
+  #filter(is.na(median_income)) |>
+  #select(NAME)
+```
+
+### Solar area per census tract
+
+To combine the datasets, each solar polygon was converted to a single point that is to fall inside it (st_point_on_surface()). I joined the dataset and assigned each point to the tract it falls in (st_join()). I was using points instead of polygons to make sure an array crossing a tract boundary is counted only once. I made sure the areas are summed per tract, and tracts with no solar get 0.
+
+\*note\* I wrote this as a function so I could rerun it later on the residential-only data.
+
+```{r}
+#| label: solar-by-tract-function
+
+sum_solar_by_tract <- function(solar_polys, tracts) {
+  solar_polys |>
+    st_point_on_surface() |>      # one point inside each array
+    st_join(select(tracts, GEOID)) |>     # which tract is it in?
+    st_drop_geometry() |>
+    filter(!is.na(GEOID)) |>
+    group_by(GEOID) |>
+    summarise(solar_area_m2 = sum(area_m2),
+              n_arrays      = n())
+}
+```
+
+```{r}
+#| label: solar-by-tract
+#| warning: false
+
+solar_all <- sum_solar_by_tract(oahu_solar_clean, oahu_income)
+
+tracts_solar <- oahu_income |>
+  left_join(solar_all, by = "GEOID") |>
+  mutate(solar_area_m2 = replace_na(solar_area_m2, 0),
+         n_arrays      = replace_na(n_arrays, 0))
+
+# Checks
+nrow(tracts_solar)                 # should equal nrow(oahu_income)
+sum(tracts_solar$solar_area_m2) / 1e6  # compare with section 3 total
+```
+
+The bigger/richer neighborhoods with more houses will have more solar because there are more roofs. This map partly shows "which tracts are big" and not "which tracts like solar."
+
+```{r}
+#| label: solar-tract-map
+
+ggplot(tracts_solar) +
+  geom_sf(aes(fill = solar_area_m2), color = NA) +
+  scale_fill_viridis_c(option = "plasma", labels = scales::label_comma()) +
+  labs(title = "Detected solar area by census tract, Oʻahu",
+       fill  = "Solar area (m²)") +
+  theme_void()
+```
+
+### Normalization
+
+I can't compare total solar between tracts because tracts have different numbers of houses. A tract with more houses will have more solar just because it has more roofs. To make a fair comparison, I divided solar area by the number of households, by the number of homeowners, and by land area (km²). Per homeowner is the most useful measure, because renters can't put panels on a roof they don't own. Per km² didn't work well, because some tracts are mostly mountains or forest where no one lives.
+
+```{r}
+#| label: get-housing
+#| message: false
+
+housing <- get_acs(
+  geography = "tract",
+  variables = c(occupied  = "B25003_001",   # occupied housing units
+                owner_occ = "B25003_002"),  # owner-occupied units
+  state  = "HI",
+  county = "Honolulu",
+  year   = 2022,
+  output = "wide"
+) |>
+  select(GEOID, occupied = occupiedE, owner_occ = owner_occE)
+```
+
+```{r}
+#| label: normalize
+
+tracts_solar <- tracts_solar |>
+  left_join(housing, by = "GEOID") |>
+  mutate(
+    tract_area_km2     = as.numeric(st_area(geometry)) / 1e6,
+    m2_per_household   = solar_area_m2 / occupied,
+    m2_per_owner_unit  = solar_area_m2 / owner_occ,
+    m2_per_km2         = solar_area_m2 / tract_area_km2
+  )
+```
+
+### Commercial-scale polygons:
+
+I removed all big solar installations because our research question is asking about income, meaning people's household. Solar farms or even panels in the mall, all paid by companies or businesses. I also found that farms were detected as many small pieces, not one big shape. To solve my problem, I grouped nearby pieces and removed groups bigger than 200 m².
+
+```{r}
+#| label: size-distribution
+
+quantile(oahu_solar_clean$area_m2, c(0.5, 0.75, 0.9, 0.95, 0.99, 0.999))
+
+ggplot(st_drop_geometry(oahu_solar_clean), aes(x = area_m2)) +
+  geom_histogram(bins = 100) +
+  scale_x_log10(labels = scales::label_comma()) +
+  labs(x = "Polygon area (m², log scale)", y = "Count",
+       title = "Size distribution of solar detections") +
+  theme_bw()
+```
+
+```{r}
+#| label: largest-polygons
+#| eval: false
+
+# Run interactively: are the biggest detections warehouses or solar farms?
+oahu_solar_clean |>
+  slice_max(area_m2, n = 25) |>
+  mapview(map.types = "Esri.WorldImagery", col.regions = "red")
+```
+
+```{r}
+#| label: proximity-clusters
+
+solar_clusters <- oahu_solar_clean |>
+  st_buffer(dist = 3) |>       # grow each polygon by 3 m
+  st_union() |>                # merge shapes that now touch
+  st_cast("POLYGON") |>        # split back into separate clusters
+  st_as_sf() |>
+  mutate(cluster_id = row_number())
+
+solar_clustered <- oahu_solar_clean |>
+  st_join(solar_clusters)
+
+cluster_stats <- solar_clustered |>
+  st_drop_geometry() |>
+  group_by(cluster_id) |>
+  summarise(n_polys         = n(),
+            cluster_area_m2 = sum(area_m2))
+
+solar_clustered <- solar_clustered |>
+  left_join(cluster_stats, by = "cluster_id")
+
+# Clusters made of the most separate polygons
+cluster_stats |> arrange(desc(n_polys)) |> head(10)
+```
+
+```{r}
+#| label: view-clusters
+#| eval: false
+
+top_ids <- cluster_stats |> slice_max(n_polys, n = 10) |> pull(cluster_id)
+
+solar_clustered |>
+  filter(cluster_id %in% top_ids) |>
+  mutate(cluster_id = factor(cluster_id)) |>     # treat as categories
+  mapview(zcol = "cluster_id",
+          map.types = "Esri.WorldImagery",
+          layer.name = "Top 10 clusters")
+```
+
+```{r}
+#| label: residential-filter
+#| warning: false
+
+threshold_m2 <- 200   # adjust based on what you saw above
+
+oahu_solar_residential <- solar_clustered |>
+  filter(cluster_area_m2 <= threshold_m2)
+
+# How much was removed?
+nrow(oahu_solar_clean) - nrow(oahu_solar_residential)
+1 - sum(oahu_solar_residential$area_m2) / sum(oahu_solar_clean$area_m2)
+
+# Residential solar per tract
+solar_res <- sum_solar_by_tract(oahu_solar_residential, oahu_income) |>
+  rename(res_solar_area_m2 = solar_area_m2,
+         res_n_arrays      = n_arrays)
+
+tracts_solar <- tracts_solar |>
+  left_join(solar_res, by = "GEOID") |>
+  mutate(res_solar_area_m2     = replace_na(res_solar_area_m2, 0),
+         res_n_arrays          = replace_na(res_n_arrays, 0),
+         res_m2_per_owner_unit = res_solar_area_m2 / owner_occ)
+```
+
+### Relationship between income and solar
+
+```{r}
+#| label: analysis-data
+
+analysis_df <- tracts_solar |>
+  filter(!is.na(median_income), occupied > 0, owner_occ > 0)
+
+nrow(analysis_df)   # number of tracts in the analysis
+```
+
+The blue line goes up slightly, meaning higher-income tracts tend to have a bit more solar. Most tracts are clustered near the bottom, and a few tracts have very large amounts of solar, likely from commercial installations or solar farms, which is why I removed large installations in the next step.
+
+```{r}
+#| label: scatter-raw
+#| message: false
+
+ggplot(analysis_df, aes(x = median_income, y = solar_area_m2)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm") +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(x = "Median household income",
+       y = "Detected solar area (m²)",
+       title = "Solar area vs. median income, Oʻahu census tracts") +
+  theme_bw()
+```
+
+Each dot in the scatter plots represents one census tract (294 tracts). In the first plot (total solar area), the blue line goes up slightly, meaning higher-income tracts tend to have a bit more solar. A few tracts have very large amounts of solar, likely from commercial installations or solar farms. In the second plot (home solar per homeowner), most tracts are clustered near the bottom and the line is almost flat. This is because a few tracts with very few homeowners have extreme values, the dots far above the rest.
+
+```{r}
+#| label: scatter-normalized
+#| message: false
+
+ggplot(analysis_df, aes(x = median_income, y = res_m2_per_owner_unit)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm") +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(x = "Median household income",
+       y = "Residential solar area per owner-occupied unit (m²)",
+       title = "Normalized residential solar vs. median income") +
+  theme_bw()
+```
+
+### Correlation
+
+A correlation tells you whether two things go up together. I found that richer tracts have more home solar. The strongest result was home solar only (*p* = 0.70, p \< 0.001), even though I divided by the number of homeowners, the relationship was still moderate (*p* = 0.46, p \< 0.001). p - values are is very small, meaning these results are unlikely to be due to chance.
+
+```{r}
+#| label: correlation
+
+measures <- c("solar_area_m2", "res_solar_area_m2",
+              "m2_per_household", "m2_per_owner_unit",
+              "res_m2_per_owner_unit", "m2_per_km2")
+
+cor_table <- map(measures, \(m) {
+  p <- cor.test(analysis_df$median_income, analysis_df[[m]],
+                method = "pearson")
+  s <- cor.test(analysis_df$median_income, analysis_df[[m]],
+                method = "spearman", exact = FALSE)
+  tibble(measure      = m,
+         pearson_r    = p$estimate,
+         pearson_p    = p$p.value,
+         spearman_rho = s$estimate,
+         spearman_p   = s$p.value)
+}) |>
+  list_rbind()
+
+cor_table
+```
+
+### Robustness
+
+For home solar per homeowner, the two methods disagreed: Pearson was −0.04 and Spearman was 0.46. I found that a few tracts had only 3–13 homeowners but a lot of solar, probably on rental or military housing. Dividing a big amount of solar by a tiny number of homeowners gave huge values, which threw off Pearson. When I removed the 11 tracts with fewer than 50 homeowners, Pearson went up to 0.44, close to Spearman's 0.53 (both p \< 0.001). This shows the relationship is real. A few unusual tracts were just hiding it.
+
+```{r}
+#| label: robustness
+
+robust_df <- analysis_df |> filter(owner_occ >= 50)
+
+nrow(robust_df)
+
+cor.test(robust_df$median_income, robust_df$res_m2_per_owner_unit, method = "pearson")
+cor.test(robust_df$median_income, robust_df$res_m2_per_owner_unit,
+         method = "spearman", exact = FALSE)
 ```
