@@ -1,0 +1,173 @@
+---
+title: "Nighttime Lights in Hawaiʻi"
+subtitle: "Exploring NASA Black Marble data with blackmarbler"
+format: html
+editor: visual
+---
+
+## What this does
+
+NASA's Black Marble satellite data shows how bright places are at night. Brighter usually means more people, buildings, and electricity. In this notebook I used the `blackmarbler` package to pull nighttime lights for Hawaiʻi at three time scales (daily, monthly, and yearly), made a map, and looked at how brightness changed from 2012 to 2022.
+
+## Setup
+
+```{r}
+#| message: false
+#| warning: false
+
+library(blackmarbler)
+library(sf)
+library(terra)
+library(ggplot2)
+library(tidyterra)
+library(lubridate)
+library(tigris)
+library(dplyr)
+library(purrr)
+library(tibble)
+library(exactextractr)
+
+options(tigris_use_cache = TRUE)
+```
+
+NASA Earthdata login, needed to download Black Marble data. (I'm using the class login here so my own password isn't posted on GitHub.)
+
+```{r bearer-token}
+bearer <- get_nasa_token(username = "connorflynn",
+                         password = "EarthData120")
+```
+
+## Region of interest
+
+The region has to be an `sf` polygon in WGS84 (EPSG:4326). I used Hawaiʻi's counties and cropped out the Northwestern Hawaiian Islands so the maps focus on the main islands.
+
+```{r roi}
+roi_hawaii <- counties(state = "HI", cb = TRUE, year = 2022) |>
+  st_transform(4326) |>
+  st_crop(xmin = -160.5, xmax = -154.5, ymin = 18.5, ymax = 22.5) |>
+  filter(NAME != "Kalawao")
+```
+
+## Three time scales
+
+Black Marble comes in three versions:
+
+- **VNP46A2:** daily (one night)
+- **VNP46A3:** monthly (average of a month)
+- **VNP46A4:** yearly (average of a year)
+
+```{r daily}
+# Daily: February 5, 2021
+r_20210205 <- bm_raster(roi_sf = roi_hawaii,
+                        product_id = "VNP46A2",
+                        date = "2021-02-05",
+                        bearer = bearer)
+```
+
+```{r monthly}
+# Monthly: October 2021 (the day is ignored)
+r_202110 <- bm_raster(roi_sf = roi_hawaii,
+                      product_id = "VNP46A3",
+                      date = "2021-10-01",
+                      bearer = bearer)
+```
+
+```{r yearly}
+# Yearly: 2021
+r_2021 <- bm_raster(roi_sf = roi_hawaii,
+                    product_id = "VNP46A4",
+                    date = 2021,
+                    bearer = bearer)
+```
+
+## Map: October 2021
+
+Most places are dark and a few are very bright, so I used a log scale. That way both dim towns and bright cities show up on the map.
+
+```{r map-oct-2021}
+r <- r_202110 |> terra::mask(roi_hawaii)
+
+r <- log(r + 1)
+
+ggplot() +
+  geom_spatraster(data = r) +
+  geom_sf(data = roi_hawaii, fill = NA, color = "grey40", linewidth = 0.2) +
+  scale_fill_gradient2(low = "black",
+                       mid = "yellow",
+                       high = "red",
+                       midpoint = 4.5,
+                       na.value = "transparent") +
+  labs(title = "Hawaiʻi Nighttime Lights: October 2021") +
+  coord_sf() +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        legend.position = "none")
+```
+
+Honolulu on Oʻahu is by far the brightest spot. Smaller bright spots show up around Kahului (Maui), Hilo and Kona (Big Island), and Līhuʻe (Kauaʻi).
+
+## Trend: 2012 to 2022
+
+This pulls the yearly average brightness for each county from 2012 to 2022.
+
+```{r annual-trend}
+# Download each year's map, then average the brightness inside each county
+ntl_df <- map_dfr(2012:2022, function(y) {
+  r_y <- bm_raster(roi_sf = roi_hawaii,
+                   product_id = "VNP46A4",
+                   date = y,
+                   bearer = bearer)
+  tibble(NAME = roi_hawaii$NAME,
+         date = y,
+         ntl_mean = exact_extract(r_y, roi_hawaii, fun = "mean"))
+})
+
+ntl_df |>
+  ggplot(aes(x = date, y = ntl_mean)) +
+  geom_col(fill = "darkorange") +
+  facet_wrap(~NAME, scales = "free_y") +
+  labs(x = NULL,
+       y = "Average nighttime brightness",
+       title = "Hawaiʻi Counties: Yearly Average Nighttime Lights, 2012–2022") +
+  scale_x_continuous(breaks = seq(2012, 2022, 4)) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+**What I see:** Honolulu County is much brighter than the other counties every year. Each panel has its own y-axis, so look at the shape of the bars to see whether a county got brighter or darker over time: \_\_\_.
+
+## Daily data: January 2023
+
+This pulls each night of **January 2023** and averages the brightness in each county. I only used one month, because pulling every day up to today would take a very long time. If a night fails to download (for example, because of clouds), it gets skipped.
+
+```{r daily-extract}
+#| warning: false
+
+jan_2023 <- seq.Date(from = ymd("2023-01-01"), to = ymd("2023-01-31"), by = 1)
+
+ntl_daily <- map_dfr(jan_2023, function(d) {
+  tryCatch({
+    r_d <- bm_raster(roi_sf = roi_hawaii,
+                     product_id = "VNP46A2",
+                     date = d,
+                     bearer = bearer)
+    tibble(NAME = roi_hawaii$NAME,
+           date = d,
+           ntl_mean = exact_extract(r_d, roi_hawaii, fun = "mean"))
+  }, error = function(e) NULL)
+})
+```
+
+```{r daily-plot}
+ggplot(ntl_daily, aes(x = date, y = ntl_mean, color = NAME)) +
+  geom_line() +
+  labs(title = "Daily Nighttime Brightness by County, January 2023",
+       x = NULL, y = "Average nighttime brightness", color = "County") +
+  theme_minimal()
+```
+
+Daily data jumps around a lot from night to night, mostly because of clouds and the moon. That's why monthly or yearly averages are better for seeing long-term trends, and why daily data is useful for one-time events like power outages.
+
+## Presentation
+
+Our group presentation code (Hurricane Lane and power outages) is in a separate file: **hurricane_lane_presentation.qmd**.
