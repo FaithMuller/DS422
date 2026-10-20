@@ -393,3 +393,17 @@ cor.test(robust_df$median_income, robust_df$res_m2_per_owner_unit, method = "pea
 cor.test(robust_df$median_income, robust_df$res_m2_per_owner_unit,
          method = "spearman", exact = FALSE)
 ```
+
+# Write-up:
+
+### Methods:
+
+I used 88,663 solar panel shapes found on O'ahu by the SAM3 model, along with median household income for each census tract from the 2018–2022 American Community Survey. First thing I did was clean the data; removed 68 empty shapes, fixed broken ones, and made sure both maps used the same coordinate system so areas were measured in meters. Only thing I kept was the tracts on O'ahu. Then, I added up the solar panel areas in each tract. I divided solar area by the number of homeowners in each tract since renters can't put panels on their roof. I also removed big solar farms and business rooftops. I grouped pieces that were close together and removed any group bigger than 200 m² because the models were breaking solar farms into many small pieces. Lastly, I created a scatterplots of solar area vs. median income and calculated correlations with 2 tests, Pearson and Spearman.
+
+### Results
+
+The poorer areas are mostly on the wai'anae coast and parts of Honolulu, while the central and east side of Oahu are the richer neighborhoods. Obviously, the richer neighborhoods have more solar. But that doesn’t mean money is the only reason. Owning your home or having a bigger roof could matter too.
+
+### Conclusion 
+
+In conclusion, neighborhoods where people earn more tend to have more solar panels on their homes. The relationship is moderate and real, not just luck. This doesn't prove that income causes solar, there are some other stuff to consider like owning your home or roof size may also. matter.
