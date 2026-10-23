@@ -197,6 +197,7 @@ m
 Challenge 1: Recreate [this figure](https://github.com/jamgreen/lehdr/blob/master/vignettes/figures/fig1_balt_self_containment.png) for Hawaii
 
 ```{r}
+
 od_hi <- grab_lodes(
   state      = "hi",
   year       = 2022,
@@ -204,17 +205,64 @@ od_hi <- grab_lodes(
   job_type   = "JT00",
   segment    = "S000",
   state_part = "main",
-  agg_geo    = "county"
+  agg_geo    = "tract"
 )
-
-commute_hi <- compute_commute_stats(od_hi, agg_geo = "county")
-
-commute_hi |>
-  dplyr::arrange(dplyr::desc(self_containment)) |>
-  dplyr::select(county, workers_in, workers_out, net_flow, self_containment) |>
-  head(10)
 
 
 ```
 
+```{r}
+commute_hi <- compute_commute_stats(od_hi, agg_geo = "tract")
+```
+
+```{r}
+hi_geo <- tracts(state = "HI", year = 2022, cb = TRUE) %>%
+  select(GEOID, geometry)
+```
+
+```{r}
+commute_map_df <- hi_geo %>%
+  left_join(commute_hi, by =c("GEOID" = "tract"))
+```
+
+```{r}
+mapview(commute_map_df, zcol = "self_containment")
+```
+
 Challenge 2: Recreate t[his figure](https://github.com/jamgreen/lehdr/blob/master/vignettes/figures/fig2_md_job_change.png) for a state of your choosing
+
+```{r}
+wac_ca_panel <- grab_lodes(
+  state      = "ca",
+  year       = c(2019, 2020),
+  lodes_type = "wac",
+  job_type   = "JT00",
+  segment    = "S000",
+  agg_geo    = "county"
+)
+```
+
+```{r}
+change_ca <- compute_lodes_change(
+  wac_ca_panel,
+  geo_col      = "w_county",
+  base_year    = 2019,
+  compare_year = 2020,
+  variables    = "C000"
+)
+```
+
+```{r}
+ca_county_geo <- counties(state = "CA", year = 2020, cb = FALSE) %>%
+  mutate(GEOID = paste0(STATEFP, COUNTYFP)) %>%
+  select(GEOID, geometry)
+```
+
+```{r}
+change_map_df <- ca_county_geo %>%
+  left_join(change_ca, by = c("GEOID" = "w_county"))
+```
+
+```{r}
+mapview(change_map_df, zcol = "C000_pct_change")
+```
