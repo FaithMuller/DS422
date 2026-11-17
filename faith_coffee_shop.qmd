@@ -1,0 +1,269 @@
+---
+title: "Hale Brew Coffee Co."
+author: "Faith Muller"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+# load packages
+library(tidyverse)
+library(sf)
+library(osmdata)
+library(tidycensus)
+library(lehdr)
+library(mapboxapi)
+library(leaflet)
+library(plotly)
+```
+
+## Step 1 – Logo
+
+Meet **Hale Brew Coffee Co.** *Hale* means "house" in Hawaiian, because we want to be Waikīkī's second living room.
+
+![](logo.png){width="300"}
+
+## Step 2 – Location
+
+Hale Brew will open at **2155 Kalākaua Ave, Honolulu, HI 96815** ([LoopNet listing](https://www.loopnet.com/Listing/2155-kalakaua-Ave-Honolulu-HI/40793383/)). The ground-floor suite is already partly built out as a café, and it sits on the corner of Kalākaua Ave and Beach Walk, one of the busiest walking streets in Waikīkī.
+
+```{r}
+# my shop's location (from Google Maps)
+shop <- st_as_sf(data.frame(name = "Hale Brew", lat = 21.2805, lon = -157.8315),
+                 coords = c("lon", "lat"), crs = 4326)
+
+# map it
+leaflet(shop) |>
+  addTiles() |>
+  addMarkers(popup = "Hale Brew")
+```
+
+## Step 3 – Map the Competition
+
+```{r}
+# box around Waikiki
+waikiki_bb <- c(xmin = -157.845, ymin = 21.265, xmax = -157.810, ymax = 21.295)
+
+# placeholder in case the download fails
+close_cafes <- "(data not loaded yet)"
+
+# download cafes ONLY if I haven't saved them yet
+# (the OSM server is slow, so I save the result to a file)
+# try() means: if it fails, keep going instead of stopping
+if (!file.exists("waikiki_cafes.rds")) {
+  try({
+    cafe_query <- opq(bbox = waikiki_bb, timeout = 180) |>
+      add_osm_features(features = list("amenity" = "cafe", "shop" = "coffee"))
+    osm_raw <- osmdata_sf(cafe_query)
+    saveRDS(osm_raw, "waikiki_cafes.rds")
+  })
+}
+
+# if the download worked, use the cafes
+if (file.exists("waikiki_cafes.rds")) {
+  osm_raw <- readRDS("waikiki_cafes.rds")
+
+  # keep only points with a name (those are the cafes)
+  cafes <- osm_raw$osm_points
+  cafes <- cafes[!is.na(cafes$name), ]
+
+  # distance from each cafe to my shop, in meters
+  cafes$distance <- as.numeric(st_distance(cafes, shop))
+
+  # how many cafes are within a 10 minute walk (800 m)?
+  close_cafes <- sum(cafes$distance < 800)
+}
+close_cafes
+```
+
+```{r}
+#| error: true
+# map of cafes (brown) and my shop (blue pin); green circle = 10 min walk
+leaflet() |>
+  addTiles() |>
+  addCircles(data = shop, radius = 800, color = "green") |>
+  addCircleMarkers(data = cafes, radius = 5, color = "brown", popup = ~name) |>
+  addMarkers(data = shop, popup = "Hale Brew")
+```
+
+There are **`r close_cafes`** cafés within a 10-minute walk, so the competition is tough. Most of them serve tourists. Hale Brew will be different by serving the people who are in Waikīkī every day, like hotel workers and office workers. We will open early (5:30 AM) for hotel shifts, give local discounts, and only use Hawai'i-grown coffee.
+
+## Step 4.1 – Resident Customer Demographics
+
+```{r}
+# census variables I want
+my_vars <- c(total_pop = "B01001_001",
+             med_income = "B19013_001",
+             commuters = "B08301_001",
+             walk = "B08301_019",
+             transit = "B08301_010",
+             pop_25plus = "B15003_001",
+             bachelors = "B15003_022")
+
+# get census tracts in Honolulu County
+tracts <- get_acs(geography = "tract",
+                  variables = my_vars,
+                  state = "HI",
+                  county = "Honolulu",
+                  year = 2023,
+                  geometry = TRUE,
+                  output = "wide")
+
+# make percentages
+tracts <- tracts |>
+  mutate(pct_walk_transit = (walkE + transitE) / commutersE * 100,
+         pct_bachelors = bachelorsE / pop_25plusE * 100)
+
+# match coordinate systems
+tracts <- st_transform(tracts, 4326)
+
+# find the tract my shop is in
+my_tract <- st_join(shop, tracts)
+my_tract
+
+# keep only tracts within 3 km of my shop (so the map is zoomed in)
+nearby <- st_filter(tracts, st_buffer(shop, 3000))
+```
+
+```{r}
+# interactive map: median household income (click a tract to see its value)
+pal_income <- colorNumeric("viridis", nearby$med_incomeE)
+
+leaflet(nearby) |>
+  addProviderTiles("CartoDB.Positron") |>
+  addPolygons(fillColor = ~pal_income(med_incomeE), fillOpacity = 0.7,
+              color = "white", weight = 1,
+              popup = ~paste0(NAME, "<br>Median income: $", med_incomeE)) |>
+  addMarkers(data = shop, popup = "Hale Brew") |>
+  addLegend(pal = pal_income, values = ~med_incomeE, title = "Median Household Income")
+```
+
+```{r}
+# interactive map: percent who walk or take the bus to work
+pal_walk <- colorNumeric("viridis", nearby$pct_walk_transit)
+
+leaflet(nearby) |>
+  addProviderTiles("CartoDB.Positron") |>
+  addPolygons(fillColor = ~pal_walk(pct_walk_transit), fillOpacity = 0.7,
+              color = "white", weight = 1,
+              popup = ~paste0(NAME, "<br>Walk or bus to work: ", round(pct_walk_transit), "%")) |>
+  addMarkers(data = shop, popup = "Hale Brew") |>
+  addLegend(pal = pal_walk, values = ~pct_walk_transit, title = "% Walk or Bus to Work")
+```
+
+My shop (red dot) is in **`r my_tract$NAME`**. About **`r round(my_tract$pct_walk_transit)`%** of workers there walk or take the bus to work, so lots of people pass by on foot.
+
+## Step 4.2 – Working Customer Demographics
+
+```{r}
+# jobs located in each tract in Hawaii (LODES workplace data)
+jobs <- grab_lodes(state = "hi",
+                   year = 2021,
+                   lodes_type = "wac",
+                   agg_geo = "tract")
+
+# rename the tract ID column so it matches the census data
+jobs <- jobs |> rename(GEOID = w_tract)
+
+# C000 = total jobs, CNS18 = hotel & food jobs, CA01 = workers age 29 or under
+jobs <- jobs |> select(GEOID, total_jobs = C000, hotel_food_jobs = CNS18, young_workers = CA01)
+
+# join jobs to the nearby tracts
+nearby_jobs <- left_join(nearby, jobs, by = "GEOID")
+
+# jobs in my shop's tract
+my_jobs <- nearby_jobs |> filter(GEOID == my_tract$GEOID)
+```
+
+```{r}
+# interactive map: total jobs
+pal_jobs <- colorNumeric("viridis", nearby_jobs$total_jobs)
+
+leaflet(nearby_jobs) |>
+  addProviderTiles("CartoDB.Positron") |>
+  addPolygons(fillColor = ~pal_jobs(total_jobs), fillOpacity = 0.7,
+              color = "white", weight = 1,
+              popup = ~paste0(NAME, "<br>Total jobs: ", total_jobs)) |>
+  addMarkers(data = shop, popup = "Hale Brew") |>
+  addLegend(pal = pal_jobs, values = ~total_jobs, title = "Total Jobs")
+```
+
+```{r}
+# interactive map: hotel and food service jobs
+pal_hotel <- colorNumeric("viridis", nearby_jobs$hotel_food_jobs)
+
+leaflet(nearby_jobs) |>
+  addProviderTiles("CartoDB.Positron") |>
+  addPolygons(fillColor = ~pal_hotel(hotel_food_jobs), fillOpacity = 0.7,
+              color = "white", weight = 1,
+              popup = ~paste0(NAME, "<br>Hotel & food jobs: ", hotel_food_jobs)) |>
+  addMarkers(data = shop, popup = "Hale Brew") |>
+  addLegend(pal = pal_hotel, values = ~hotel_food_jobs, title = "Hotel & Food Jobs")
+```
+
+My shop's tract has **`r my_jobs$total_jobs`** jobs, and **`r my_jobs$hotel_food_jobs`** of them are hotel and food jobs. These workers start early and need coffee.
+
+## Step 5 – What's Nearby?
+
+```{r}
+# 10 minute walk
+walk_10 <- mb_isochrone(shop, profile = "walking", time = 10)
+
+# 5 minute drive in morning rush hour traffic (7:30 AM)
+drive_5 <- mb_isochrone(shop, profile = "driving-traffic", time = 5,
+                        depart_at = "2026-11-18T07:30")
+
+# map both
+leaflet() |>
+  addTiles() |>
+  addPolygons(data = drive_5, color = "orange") |>
+  addPolygons(data = walk_10, color = "green") |>
+  addMarkers(data = shop, popup = "Hale Brew")
+```
+
+The green area is a 10-minute walk and the orange area is a 5-minute drive at 7:30 AM. Because of morning traffic, the drive area is not much bigger than the walk area. This means most of my customers will walk in.
+
+## Step 6 – Do You Need a Generator?
+
+```{r}
+# EAGLE-I power outage data (downloaded into my data folder)
+outages <- read_csv("data/eaglei_outages_2025.csv")
+
+# keep only Honolulu County (FIPS code 15003)
+honolulu <- outages |> filter(fips_code == 15003)
+
+# make a date column
+honolulu <- honolulu |> mutate(date = as.Date(run_start_time))
+
+# biggest outage each day
+daily <- honolulu |>
+  group_by(date) |>
+  summarize(customers_out = max(customers_out))
+
+# number of days with a power outage
+outage_days <- nrow(daily)
+outage_days
+```
+
+```{r}
+# line plot of outages over time
+outage_plot <- ggplot(daily, aes(x = date, y = customers_out)) +
+  geom_line(color = "#2E4A3E") +
+  labs(title = "Honolulu County Power Outages in 2025",
+       x = "Date", y = "Customers without power") +
+  theme_minimal()
+
+# make it interactive (hover to see the date and number, drag to zoom)
+ggplotly(outage_plot)
+```
+
+Honolulu County lost power on **`r outage_days`** days in 2025. Since coffee machines and fridges need power, a small backup generator is a good idea.
+
+## Step 7 – Conclusion
+
+I think 2155 Kalākaua Ave is a great place for Hale Brew Coffee Co. The space is already partly set up as a café, which saves money on building it out. It is on a busy corner of Kalākaua Ave and Beach Walk, so lots of people walk by every day. There are `r close_cafes` other cafés within a 10-minute walk, so there is competition, but most of them are aimed at tourists. The census data show that many people in this area walk or take the bus to work, so they will pass my shop on foot. The LODES data show there are `r my_jobs$total_jobs` jobs in my tract, including many hotel and food jobs with early shifts. The isochrones show that in morning traffic, driving is barely faster than walking, so being easy to walk to matters most. Honolulu County lost power on `r outage_days` days in 2025, so a small backup generator would protect the business. By opening early, offering local discounts, and using only Hawai'i-grown coffee, Hale Brew can win over the locals and workers that other cafés ignore. Overall, this location has low setup costs, lots of foot traffic, and plenty of workers, which makes it worth investing in.

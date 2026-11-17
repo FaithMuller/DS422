@@ -20,7 +20,7 @@ Download here: <https://eha-cloud.doh.hawaii.gov/cwb/#!/sample-test-result/list>
 
 **What is the BEACH Act?**
 
-:   The Beaches Environmental Assessment and Coastal Health (BEACH) Act, promulgated in 2000 is an amendment to the federal Clean Water Act (CWA) which establishes national standard criteria for coastal recreational water monitoring and public notification of possible pollution within coastal recreational waters (beaches). The BEACH Act authorizes the EPA to provide funding to eligible states to implement a water monitoring and public notification program. The BEACH Act only applies to coastal recreational waters (marine beaches) and explicitly excludes inland waters, including waters upstream from the mouth of a river or stream.
+: The Beaches Environmental Assessment and Coastal Health (BEACH) Act, promulgated in 2000 is an amendment to the federal Clean Water Act (CWA) which establishes national standard criteria for coastal recreational water monitoring and public notification of possible pollution within coastal recreational waters (beaches). The BEACH Act authorizes the EPA to provide funding to eligible states to implement a water monitoring and public notification program. The BEACH Act only applies to coastal recreational waters (marine beaches) and explicitly excludes inland waters, including waters upstream from the mouth of a river or stream.
 
 Enterococci levels **greater than 130/100 mL** indicates that there may be an increased probability of risk of illness
 
@@ -140,10 +140,10 @@ table(wm_data_enterococcus_sf$exceeds_130)
 ```
 
 ```{r}
-wm_data_enterococcus_sf |> 
+wm_data_enterococcus_sf_exceedded <- wm_data_enterococcus_sf |> 
   filter(exceeds_130 == "TRUE") |> 
-  select(final_result, exceeds_130, result) |> 
-  print(n = 1647)
+  select(final_result, exceeds_130, result)
+
 ```
 
 How many times did each site exceed 130
@@ -181,8 +181,8 @@ honolii_cove <- wm_data_enterococcus_sf |>
 
 ```{r}
 honolii_cove |> 
-  select(final_result, exceeds_130, result) |> 
-  print(n = 1021)
+  select(final_result, exceeds_130, result) #|> 
+##print(n = 1021)
 ```
 
 ```{r}
@@ -202,6 +202,31 @@ ggplotly(honolii_line_plot)
 ### Challenge
 
 Recreate the last 4 code chunks for a location of your own
+
+```{r}
+kuhio_beach <- wm_data_enterococcus_sf |> 
+  filter(location_name == "Kuhio Beach, Waikiki")
+```
+
+```{r}
+kuhio_beach |> 
+  select(final_result, exceeds_130, result) #|> 
+##print(n = 1021)
+```
+
+```{r}
+kuhio_beach_line_plot <- ggplot(kuhio_beach, aes(x = sample_datetime, y = result)) +
+  geom_line() +
+  geom_point(size = 0.1) +
+  geom_hline(yintercept = 130, color = "red", linetype = "dashed") +
+  theme_minimal()
+
+kuhio_beach_line_plot
+```
+
+```{r}
+ggplotly(kuhio_beach_line_plot)
+```
 
 ### Is there another way?
 
